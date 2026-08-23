@@ -208,6 +208,104 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 
 ---
 
+### 2.7 Full System Architecture (All Layers Combined)
+
+The sections above show each layer in isolation. This diagram shows how
+they connect end-to-end, for both the **ingestion path** (solid arrows,
+top half) and the **query path** (solid arrows, bottom half), plus the
+**observability path** (dashed arrows) that every service feeds into.
+
+```mermaid
+flowchart TB
+    User([User])
+
+    subgraph API["API Layer (FastAPI)"]
+        AuthMW["auth.py<br/>API key / JWT check"]
+        DocRoutes["/documents routes"]
+        QueryRoutes["/query routes"]
+    end
+
+    subgraph Ingestion["Document Ingestion"]
+        Parser["Parser / Preprocessor"]
+        Dedup["Deduplicator<br/>(file hash)"]
+        Chunker["Chunker<br/>sliding window"]
+    end
+
+    subgraph Embed["Embedding Service (Local)"]
+        Embedder["Sentence-Transformers<br/>all-mpnet-base-v2"]
+        EmbCache[("Redis db 0<br/>embedding cache")]
+    end
+
+    subgraph Storage["Storage"]
+        Postgres[("PostgreSQL<br/>users / documents /<br/>chunks / queries")]
+        Chroma[("ChromaDB<br/>vectors")]
+        BM25[("BM25 index<br/>in-memory")]
+        Uploads[("/data/uploads<br/>source files")]
+    end
+
+    subgraph Retrieval["Retrieval Pipeline"]
+        QueryEmbed["Query Embedding"]
+        VectorSearch["Vector Search<br/>top-k"]
+        Reranker["Reranker<br/>cross-encoder + BM25"]
+    end
+
+    subgraph Generation["LLM Integration"]
+        PromptBuilder["Prompt Builder"]
+        Ollama["Ollama<br/>Llama 3 (8B/70B)"]
+        Formatter["Response Formatter<br/>+ citations + confidence"]
+    end
+
+    subgraph Obs["Observability"]
+        Prom["Prometheus"]
+        Loki["Loki"]
+        Jaeger["Jaeger"]
+        Grafana["Grafana"]
+    end
+
+    User -->|"1 upload doc"| DocRoutes
+    User -->|"2 ask question"| QueryRoutes
+    DocRoutes --> AuthMW
+    QueryRoutes --> AuthMW
+
+    DocRoutes --> Parser --> Dedup --> Chunker
+    Dedup --> Uploads
+    Chunker -->|"write chunk text first"| Postgres
+    Chunker --> Embedder
+    Embedder <--> EmbCache
+    Embedder -->|"then upsert vector<br/>chunks.id = chunk_id"| Chroma
+    Postgres --> BM25
+
+    QueryRoutes --> QueryEmbed --> Embedder
+    QueryEmbed --> VectorSearch
+    VectorSearch --> Chroma
+    VectorSearch --> BM25
+    VectorSearch --> Reranker
+    Reranker --> PromptBuilder
+    PromptBuilder --> Ollama
+    Ollama --> Formatter
+    Formatter -->|"log query + confidence_score"| Postgres
+    Formatter -->|"3 answer + sources"| User
+
+    Ingestion -.->|metrics/logs| Prom
+    Embed -.->|metrics/logs| Prom
+    Retrieval -.->|metrics/logs| Prom
+    Generation -.->|metrics/logs| Prom
+    API -.->|metrics/logs| Prom
+    Ingestion -.->|traces| Jaeger
+    Retrieval -.->|traces| Jaeger
+    Generation -.->|traces| Jaeger
+    Prom --> Grafana
+    Loki --> Grafana
+    Jaeger --> Grafana
+```
+
+**How to read it as a beginner:**
+- **Top half = ingestion**: a document becomes searchable chunks + vectors, written to Postgres *before* ChromaDB (per Section 4's consistency rule).
+- **Bottom half = query**: a question is embedded the same way documents were, matched against stored vectors (+ BM25 for keyword matches), reranked, then handed to the LLM as context.
+- **Dashed lines = observability**: every layer emits metrics/logs/traces regardless of whether the request succeeds — this is what lets Grafana show "why is retrieval slow" without guessing.
+
+---
+
 ## 3. Technology Stack (100% Open Source & Free)
 
 ### Core Libraries
