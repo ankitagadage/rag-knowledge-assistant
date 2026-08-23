@@ -11,9 +11,55 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 
 ---
 
-## 2. Architecture Components
+## 2. Requirements
 
-### 2.1 Document Ingestion Layer
+Functional requirements describe **what the system does** — the features
+a user or another system can observe. Non-functional requirements describe
+**how well it has to do it** — qualities like speed, cost, or security that
+don't show up as a single feature but shape almost every design decision
+below (e.g. "must run with $0 infra cost" is why every component in
+Section 4 is self-hosted and open-source instead of a paid API). Each
+requirement below links to the section that implements it, so you can trace
+"why does this exist?" back to a concrete need.
+
+### 2.1 Functional Requirements
+
+| ID | Requirement | Implemented in |
+|----|-------------|-----------------|
+| FR-1 | Ingest documents (PDF, DOCX, TXT, Markdown) via upload | 3.1, 6 |
+| FR-2 | Detect and reject duplicate documents by content hash | 3.1, 5 |
+| FR-3 | Split documents into overlapping chunks for retrieval | 3.1, 7 |
+| FR-4 | Generate local vector embeddings for chunks and queries | 3.2 |
+| FR-5 | Store and persist vector embeddings with metadata | 3.3, 5 |
+| FR-6 | Retrieve the top-k most relevant chunks for a query (vector + keyword/BM25) | 3.4 |
+| FR-7 | Re-rank retrieved chunks before generation | 3.4 |
+| FR-8 | Generate an answer grounded in retrieved context, with source citations | 3.5 |
+| FR-9 | Authenticate requests via API key/JWT and scope data per user | 5, 6 |
+| FR-10 | Manage documents: list, view, delete, reprocess | 6 |
+| FR-11 | Track query history (question, answer, sources, timings) per user | 5 |
+| FR-12 | Expose health, metrics, and system-stats endpoints | 6, 9 |
+| FR-13 | Emit metrics, structured logs, and traces for every request | 3.6, 9 |
+
+### 2.2 Non-Functional Requirements
+
+| ID | Requirement | Target / Constraint | Implemented in |
+|----|-------------|----------------------|-----------------|
+| NFR-1 | **Latency** — query response time | P50 < 500ms, P95 < 2s, P99 < 5s | 14 |
+| NFR-2 | **Throughput** — concurrent queries | 10+ concurrent queries | 14 |
+| NFR-3 | **Cost** — infrastructure spend | $0/month, fully self-hosted | 1, 12 |
+| NFR-4 | **Data privacy** — no data leaves the deployment | Zero external API calls (local embeddings + local LLM) | 3.2, 3.5 |
+| NFR-5 | **Security** — request authentication & rate limiting | Auth required in production, secrets never hardcoded | 13 |
+| NFR-6 | **Durability** — no data loss on failure | Nightly backups of Postgres + ChromaDB; Postgres/ChromaDB writes stay consistent | 5, 12 |
+| NFR-7 | **Observability** — diagnosability of any request | Metrics, logs, and traces for every layer, not just errors | 3.6, 9 |
+| NFR-8 | **Portability** — deployable in different environments | Runs via Docker Compose on a laptop or via Kubernetes at scale | 12 |
+| NFR-9 | **Scalability** — handling load growth | Horizontal pod autoscaling on the API/embedding/LLM services | 10, 13 |
+| NFR-10 | **Retrieval quality** — relevance of retrieved chunks | NDCG 0.75+, Hit Rate@5 0.85+ | 14 |
+
+---
+
+## 3. Architecture Components
+
+### 3.1 Document Ingestion Layer
 ```
 ┌─────────────────────────┐
 │   Document Sources      │
@@ -41,13 +87,13 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 
 **Key Features:**
 - Multi-format support (PDF, DOCX, TXT, Markdown)
-- Fixed-size sliding-window chunking with overlap (see 6. Configuration)
+- Fixed-size sliding-window chunking with overlap (see 7. Configuration)
 - Metadata extraction and preservation
 - Duplicate detection with fingerprinting
 
 ---
 
-### 2.2 Embedding Generation Layer (Local)
+### 3.2 Embedding Generation Layer (Local)
 ```
 ┌─────────────────────────────────────┐
 │   Text Chunks                       │
@@ -79,7 +125,7 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 
 ---
 
-### 2.3 Vector Storage Layer
+### 3.3 Vector Storage Layer
 ```
 ┌──────────────────────────────────┐
 │   Vector Database                │
@@ -106,7 +152,7 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 
 ---
 
-### 2.4 Retrieval Pipeline Layer
+### 3.4 Retrieval Pipeline Layer
 ```
 ┌─────────────────────────┐
 │   User Query            │
@@ -145,7 +191,7 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 
 ---
 
-### 2.5 LLM Integration Layer (Local Llama 3)
+### 3.5 LLM Integration Layer (Local Llama 3)
 ```
 ┌──────────────────────────────────┐
 │   Retrieved Context              │
@@ -181,7 +227,7 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 
 ---
 
-### 2.6 Observability Stack
+### 3.6 Observability Stack
 ```
 ┌──────────────────────────────────────────────┐
 │     Application Metrics                      │
@@ -208,7 +254,7 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 
 ---
 
-### 2.7 Full System Architecture (All Layers Combined)
+### 3.7 Full System Architecture (All Layers Combined)
 
 The sections above show each layer in isolation. This diagram shows how
 they connect end-to-end, for both the **ingestion path** (solid arrows,
@@ -300,13 +346,13 @@ flowchart TB
 ```
 
 **How to read it as a beginner:**
-- **Top half = ingestion**: a document becomes searchable chunks + vectors, written to Postgres *before* ChromaDB (per Section 4's consistency rule).
+- **Top half = ingestion**: a document becomes searchable chunks + vectors, written to Postgres *before* ChromaDB (per Section 5's consistency rule).
 - **Bottom half = query**: a question is embedded the same way documents were, matched against stored vectors (+ BM25 for keyword matches), reranked, then handed to the LLM as context.
 - **Dashed lines = observability**: every layer emits metrics/logs/traces regardless of whether the request succeeds — this is what lets Grafana show "why is retrieval slow" without guessing.
 
 ---
 
-## 3. Technology Stack (100% Open Source & Free)
+## 4. Technology Stack (100% Open Source & Free)
 
 ### Core Libraries
 ```
@@ -372,7 +418,7 @@ Docker
 
 ---
 
-## 4. Database Schema
+## 5. Database Schema
 
 ### Users Table
 ```sql
@@ -469,7 +515,7 @@ CREATE TABLE queries (
 
 ---
 
-## 5. API Endpoints
+## 6. API Endpoints
 
 ### Auth
 ```
@@ -506,7 +552,7 @@ GET    /api/v1/logs                      Recent logs (JSON)
 
 ---
 
-## 6. Configuration Management
+## 7. Configuration Management
 
 ```yaml
 # config.yaml
@@ -634,7 +680,7 @@ security:
 
 ---
 
-## 7. Project Structure
+## 8. Project Structure
 
 ```
 rag-knowledge-assistant/
@@ -754,7 +800,7 @@ rag-knowledge-assistant/
 
 ---
 
-## 8. Observability & Monitoring
+## 9. Observability & Monitoring
 
 ### Metrics Collection (Prometheus)
 ```python
@@ -871,7 +917,7 @@ Available Dashboards:
 
 ---
 
-## 9. Implementation Phases
+## 10. Implementation Phases
 
 ### Phase 1: Core Infrastructure + Observability (Week 1-2)
 - [x] Project setup and structure
@@ -931,7 +977,7 @@ Available Dashboards:
 
 ---
 
-## 10. Data Flow Example
+## 11. Data Flow Example
 
 ```
 User uploads "research.pdf"
@@ -967,7 +1013,7 @@ User submits query: "What are the key findings?"
 
 ---
 
-## 11. Cost & Infrastructure Analysis
+## 12. Cost & Infrastructure Analysis
 
 ### **Monthly Cost: $0 (Self-Hosted)**
 
@@ -1009,16 +1055,16 @@ since chunks can't be regenerated without the originals.
 
 ---
 
-## 12. Security & Best Practices
+## 13. Security & Best Practices
 
 ### Security Implementation
-Status reflects the design, not a finished build (see Section 9 for what's
+Status reflects the design, not a finished build (see Section 10 for what's
 actually implemented so far).
 - [ ] Input validation & sanitization (Pydantic schemas — planned)
 - [ ] File upload malware scanning (e.g. ClamAV) — hash-based dedup only so far, NOT a security scan
 - [ ] API authentication (API key/JWT via `api/auth.py` + `users` table — planned)
 - [ ] Rate limiting
-- [ ] Secrets via environment variables / secret store (no plaintext credentials in config — see Section 6)
+- [ ] Secrets via environment variables / secret store (no plaintext credentials in config — see Section 7)
 - [ ] Audit logging with Loki
 - [ ] RBAC (`users.role` column exists in schema — enforcement not yet built)
 
@@ -1040,7 +1086,7 @@ actually implemented so far).
 
 ---
 
-## 13. Evaluation Metrics
+## 14. Evaluation Metrics
 
 ### Retrieval Quality
 - **NDCG (Normalized Discounted Cumulative Gain)**: 0.75+
@@ -1070,7 +1116,7 @@ LLM-judged metrics instead (e.g. via the RAGAS framework):
 
 ---
 
-## 14. Open Source Dependencies
+## 15. Open Source Dependencies
 
 All dependencies are free and open source. Most are permissively licensed
 (Apache 2.0, MIT, BSD); Loki and Grafana are AGPLv3, which is still free
@@ -1107,7 +1153,7 @@ Testing:
 
 ---
 
-## 15. Quick Start (Self-Hosted)
+## 16. Quick Start (Self-Hosted)
 
 ```bash
 # Clone repository
