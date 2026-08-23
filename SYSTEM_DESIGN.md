@@ -91,6 +91,16 @@ requirement below links to the section that implements it, so you can trace
 - Metadata extraction and preservation
 - Duplicate detection with fingerprinting
 
+**Why this layer exists:** a RAG system can only ever answer from what it
+has ingested — this is the front door. Documents arrive as messy,
+inconsistent formats (a PDF isn't plain text; a DOCX has markup); this
+layer normalizes all of them into clean text. Chunking matters because
+neither the embedding model nor the LLM's context window can consume a
+whole document at once — chunks are the unit everything downstream (3.2
+onward) operates on. Deduplication exists purely for cost/storage: without
+it, re-uploading the same PDF twice would silently double your vector
+storage and pollute retrieval results with duplicate hits.
+
 ---
 
 ### 3.2 Embedding Generation Layer (Local)
@@ -123,6 +133,18 @@ requirement below links to the section that implements it, so you can trace
 - Quality metrics tracking
 - ZERO external API calls
 
+**Why this layer exists:** this is the layer that makes "retrieval" possible
+at all. An embedding model converts text into a vector (a list of numbers)
+positioned so that texts with similar *meaning* end up close together in
+that vector space — even if they don't share any of the same words. That's
+what separates RAG from plain keyword search: a query like "how do I undo
+a commit?" can retrieve a chunk about "reverting changes" even though no
+words overlap. Caching exists because embedding is comparatively expensive
+CPU/GPU work — the same chunk should never be re-embedded twice, and
+repeated identical queries shouldn't either. Running it locally (rather
+than calling an embeddings API) is what keeps this system's cost at $0 and
+keeps your documents from ever leaving your machine.
+
 ---
 
 ### 3.3 Vector Storage Layer
@@ -149,6 +171,16 @@ requirement below links to the section that implements it, so you can trace
 - Similarity-based retrieval
 - Scalable indexing
 - No external dependencies
+
+**Why this layer exists:** once you have thousands (or millions) of chunk
+vectors, you can't just loop over all of them and compute similarity to
+the query one by one — that's too slow to be interactive. A vector
+database builds an index (approximate nearest-neighbor search) purpose-
+built for "find the k closest vectors to this one" queries, turning what
+would be a slow brute-force scan into a fast lookup. It also persists
+vectors to disk so the app doesn't need to re-embed every document each
+time it restarts — embeddings are computed once, at ingestion time, and
+reused for every future query.
 
 ---
 
@@ -189,6 +221,17 @@ requirement below links to the section that implements it, so you can trace
 - Cache hits        - Query metadata
 ```
 
+**Why this layer exists:** this is the "R" in RAG — turning a user's raw
+question into the specific handful of chunks the LLM should read before
+answering. Vector search alone can miss exact matches (product codes,
+names, acronyms) because it reasons about meaning, not exact text — BM25
+keyword scoring catches those. Reranking exists because top-k vector/BM25
+results are a rough first pass optimized for speed, not precision; a
+slower but more accurate cross-encoder then re-scores just those few
+candidates to pick the genuinely best ones. Skipping reranking generally
+means feeding the LLM noisier context, which is one of the most common
+causes of hallucinated or off-target answers in RAG systems.
+
 ---
 
 ### 3.5 LLM Integration Layer (Local Llama 3)
@@ -225,6 +268,17 @@ requirement below links to the section that implements it, so you can trace
 - Cache hits               - Errors/retries
 ```
 
+**Why this layer exists:** retrieval only returns raw text snippets — this
+is the layer that actually writes an answer, in natural language, that
+directly addresses the user's question, synthesizing information across
+several retrieved chunks rather than just returning them verbatim. Prompt
+construction matters because *how* the context is presented to the LLM
+(ordering, formatting, explicit instruction to only use the given context)
+directly affects whether it stays grounded in your documents or drifts
+into making things up. Running Llama 3 locally via Ollama, instead of
+calling a hosted LLM API, is the single biggest reason this system costs
+$0/month and never sends your private documents to a third party.
+
 ---
 
 ### 3.6 Observability Stack
@@ -251,6 +305,17 @@ requirement below links to the section that implements it, so you can trace
 - **Loki**: Log aggregation (FREE)
 - **Jaeger**: Distributed tracing (FREE)
 - **Grafana**: Dashboards & visualization (FREE)
+
+**Why this layer exists:** RAG pipelines fail *quietly* — a wrong or
+irrelevant answer doesn't throw an exception, it just looks like a normal
+response. Without visibility into each stage, you can't tell whether a bad
+answer came from poor retrieval (wrong chunks found), a bad rerank, prompt
+construction, or the LLM ignoring good context. Metrics answer "is this
+slow/failing right now" in aggregate; logs answer "what exactly happened
+on this one request"; tracing answers "which specific stage, across
+services, is where the time went" for that one request. Together they turn
+debugging from guesswork into something you can actually diagnose — this
+is what "Observable" in Section 1's key principles is referring to.
 
 ---
 
@@ -415,6 +480,21 @@ Docker
 ├── Jaeger (Tracing)
 └── Grafana (Dashboards)
 ```
+
+**Why each container exists:**
+
+| Component | Role | Why it's needed |
+|-----------|------|------------------|
+| **Ollama** | Runs the Llama 3 LLM | Generates the actual answer text. Local, so no per-request API cost and no document ever leaves the machine (3.5). |
+| **Embedding Service** | Runs Sentence-Transformers | Turns text into vectors for both ingestion and query time — the mechanism that makes semantic search possible at all (3.2). |
+| **RAG Application (FastAPI)** | Orchestrates everything | The "brain" that wires ingestion → retrieval → generation together and exposes it over HTTP; every other container is a dependency it calls. |
+| **PostgreSQL** | Structured metadata store | Vector databases are bad at relational queries (joins, transactions, "list all documents by this user"). Postgres holds users, documents, chunks, and query history — anything that needs consistency guarantees (5). |
+| **Redis** | Cache + task queue broker | Avoids recomputing embeddings for identical text, and lets large document uploads be processed asynchronously (via Celery) instead of blocking the API request (7). |
+| **ChromaDB** | Vector index | The actual similarity-search engine — stores embeddings and answers "which chunks are closest to this query vector" fast, at scale (3.3). |
+| **Prometheus** | Metrics time-series DB | Answers "how is the system trending" — latency, error rates, cache hit rates over time. |
+| **Loki** | Log aggregation | Answers "what exactly happened on this one request" — the detailed, per-event record Prometheus's numbers don't capture. |
+| **Jaeger** | Distributed tracing | Answers "which stage, across services, is where the time went" for one specific slow request — critical once a query touches 5+ services. |
+| **Grafana** | Dashboards | The human-facing layer that turns Prometheus/Loki/Jaeger's raw data into something you can actually look at and alert on. |
 
 ---
 
