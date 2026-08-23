@@ -41,7 +41,7 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 
 **Key Features:**
 - Multi-format support (PDF, DOCX, TXT, Markdown)
-- Intelligent document chunking with semantic boundaries
+- Fixed-size sliding-window chunking with overlap (see 6. Configuration)
 - Metadata extraction and preservation
 - Duplicate detection with fingerprinting
 
@@ -127,8 +127,11 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
          ▼
 ┌─────────────────────────┐
 │   Re-ranking (optional) │
-│   - Semantic similarity │
-│   - BM25 scoring        │
+│   - Cross-encoder score │
+│   - BM25 keyword score  │
+│   - In-memory BM25 index│
+│     (rank-bm25, rebuilt │
+│     from Postgres text) │
 └────────┬────────────────┘
          │
     ┌────┴────────────────┐
@@ -163,7 +166,7 @@ A comprehensive, **cost-free, fully open-source** system to ingest documents, cr
 │   Local LLM (Llama 3)            │
 │   - Ollama Runtime               │
 │   - Running in Container         │
-│   - 7B/13B model sizes          │
+│   - 8B/70B model sizes          │
 └────────┬─────────────────────────┘
          │
     ┌────┴──────────────────────┐
@@ -223,6 +226,9 @@ Python 3.11+
 ├── Vector Database
 │   ├── chromadb (Primary)
 │   └── faiss-cpu (Alternative)
+├── Keyword Search / Reranking
+│   ├── rank-bm25 (BM25 index, in-memory)
+│   └── sentence-transformers cross-encoder (reranker)
 ├── Local LLM
 │   ├── ollama (inference server)
 │   └── llama-cpp-python (optional)
@@ -270,6 +276,22 @@ Docker
 
 ## 4. Database Schema
 
+### Users Table
+```sql
+CREATE TABLE users (
+  id UUID PRIMARY KEY,
+  email VARCHAR(255) UNIQUE NOT NULL,
+  api_key_hash VARCHAR(255) UNIQUE NOT NULL,  -- hashed, never store raw keys
+  role VARCHAR(20) DEFAULT 'user',            -- 'user' | 'admin', for RBAC
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMP,
+  last_login_at TIMESTAMP
+);
+```
+`queries.user_id` and the structured logs' `user_id` field reference this
+table. With `security.enable_auth: true`, `api/auth.py` verifies the API
+key/JWT on every request and resolves it to a `users.id`.
+
 ### Document Table
 ```sql
 CREATE TABLE documents (
@@ -308,8 +330,8 @@ CREATE TABLE chunks (
 ```
 chromadb/
 ├── documents/
-│   ├── chunk_id (ID)
-│   ├── content (Text)
+│   ├── chunk_id (ID)            -- same UUID as chunks.id in Postgres
+│   ├── content (Text)           -- denormalized copy for retrieval speed
 │   ├── embedding (Vector 768-dim)
 │   ├── document_id (Metadata)
 │   ├── filename (Metadata)
@@ -317,6 +339,12 @@ chromadb/
 │   └── timestamp (Metadata)
 └── chroma.sqlite
 ```
+**Postgres is the source of truth for chunk text; ChromaDB is a derived,
+rebuildable index.** Write order: insert into `chunks` (Postgres) first,
+then upsert into ChromaDB using `chunks.id` as the ChromaDB `chunk_id`.
+If the ChromaDB upsert fails, the chunk is left `status='processing'` and
+a retry job re-syncs it — never write to ChromaDB first, since a failed
+Postgres write would leave an orphaned vector with no citation record.
 
 ### Queries Table (for tracking)
 ```sql
@@ -330,7 +358,12 @@ CREATE TABLE queries (
   generation_time_ms INT,
   retrieval_time_ms INT,
   total_time_ms INT,
-  confidence_score FLOAT,
+  confidence_score FLOAT,  -- NOT the LLM's self-reported confidence (LLMs
+                            -- can't reliably report that). Computed as the
+                            -- average vector-similarity score of the chunks
+                            -- actually cited in the answer — a proxy for
+                            -- "how well the source material matched the
+                            -- question," not "how correct the answer is."
   model_version VARCHAR(50),
   created_at TIMESTAMP
 );
@@ -339,6 +372,14 @@ CREATE TABLE queries (
 ---
 
 ## 5. API Endpoints
+
+### Auth
+```
+POST   /api/v1/auth/register             Create a user, returns an API key (shown once)
+POST   /api/v1/auth/rotate-key           Invalidate old key, issue a new one
+```
+All endpoints below require `Authorization: Bearer <api_key>` when
+`security.enable_auth: true`, verified by `api/auth.py` against `users.api_key_hash`.
 
 ### Document Management
 ```
@@ -383,7 +424,7 @@ embedding:
   provider: "sentence-transformers"
   model: "all-mpnet-base-v2"
   dimension: 768
-  device: "cuda"  # or "cpu"
+  device: "cpu"  # set to "cuda" only if a GPU is confirmed available
   batch_size: 32
   cache_enabled: true
   cache_ttl_seconds: 86400
@@ -391,7 +432,7 @@ embedding:
 # Local LLM Configuration (Llama 3)
 llm:
   provider: "ollama"
-  model: "llama2:13b"  # or "llama2:7b"
+  model: "llama3:8b"  # or "llama3:70b" for higher quality (needs ~40GB+ RAM/VRAM)
   base_url: "http://ollama:11434"
   temperature: 0.7
   top_p: 0.9
@@ -403,11 +444,14 @@ llm:
   request_timeout: 60
 
 # Chunking Configuration
+# Sizes are in CHARACTERS, not tokens (roughly chars / 4 ≈ tokens).
+# Fixed-size sliding window — simple and predictable, but can cut
+# mid-sentence. A semantic/recursive chunker is a future upgrade.
 chunking:
   strategy: "sliding_window"
-  chunk_size: 512
-  overlap: 100
-  min_chunk_size: 50
+  chunk_size_chars: 512
+  overlap_chars: 100
+  min_chunk_size_chars: 50
 
 # Vector Database Configuration
 vector_db:
@@ -425,15 +469,21 @@ retrieval:
   reranker_model: "cross-encoder/ms-marco-MiniLM-L-12-v2"
 
 # Caching Configuration
+# Redis DB indices are separated so a cache flush/eviction never touches
+# the Celery task queue: db 0 = app cache, db 1 = Celery broker/results.
 cache:
   backend: "redis"
-  redis_url: "redis://redis:6379/0"
+  redis_url: "${REDIS_CACHE_URL}"  # e.g. redis://redis:6379/0, from .env
   ttl_seconds: 3600
   max_size_mb: 1024
+  eviction_policy: "allkeys-lru"
+
+celery:
+  broker_url: "${CELERY_BROKER_URL}"  # e.g. redis://redis:6379/1
 
 # PostgreSQL Configuration
 database:
-  url: "postgresql://rag_user:rag_password@postgres:5432/rag_db"
+  url: "${DATABASE_URL}"  # e.g. postgresql://user:pass@postgres:5432/rag_db, from .env — never commit real credentials
   pool_size: 20
   max_overflow: 10
   echo: false
@@ -467,7 +517,7 @@ observability:
   grafana:
     enabled: true
     url: "http://grafana:3000"
-    admin_password: "admin"
+    admin_password: "${GRAFANA_ADMIN_PASSWORD}"  # from .env, never a default like "admin"
 
 # File Upload Configuration
 file_upload:
@@ -478,9 +528,9 @@ file_upload:
 
 # Security Configuration
 security:
-  enable_auth: false  # Set true for production
+  enable_auth: true   # false is fine for local dev only — never in production
   cors_origins: ["http://localhost:3000", "http://localhost:8000"]
-  rate_limit_enabled: false  # Set true for production
+  rate_limit_enabled: true
   rate_limit_per_minute: 60
 ```
 
@@ -523,6 +573,7 @@ rag-knowledge-assistant/
 │   ├── retrieval/
 │   │   ├── __init__.py
 │   │   ├── retriever.py
+│   │   ├── bm25_index.py       # Builds/queries in-memory BM25 index
 │   │   ├── reranker.py
 │   │   ├── query_processor.py
 │   │   └── metrics.py
@@ -550,6 +601,7 @@ rag-knowledge-assistant/
 │   └── api/
 │       ├── __init__.py
 │       ├── app.py
+│       ├── auth.py             # API-key/JWT verification dependency
 │       ├── routes/
 │       │   ├── __init__.py
 │       │   ├── documents.py
@@ -583,6 +635,7 @@ rag-knowledge-assistant/
 │   ├── jaeger.yaml
 │   ├── grafana.yaml
 │   ├── ingress.yaml
+│   ├── backup-cronjob.yaml    # pg_dump + ChromaDB PV snapshot on a schedule
 │   └── kustomization.yaml
 ├── docker/
 │   ├── Dockerfile.embedding-service
@@ -848,18 +901,28 @@ Can run on:
 - Docker Swarm
 ```
 
+### Backup & Disaster Recovery
+Postgres (documents/chunks/users metadata) and ChromaDB (vectors) are both
+stateful and are the only copies of ingested knowledge — losing them means
+re-ingesting every document. `kubernetes/backup-cronjob.yaml` runs a nightly
+`pg_dump` and a ChromaDB persistent-volume snapshot to external storage.
+Uploaded source files in `/data/uploads` should be backed up the same way,
+since chunks can't be regenerated without the originals.
+
 ---
 
 ## 12. Security & Best Practices
 
 ### Security Implementation
-- [x] Input validation & sanitization
-- [x] File upload scanning
-- [x] API authentication (JWT optional)
-- [x] Rate limiting
-- [x] Encrypted credentials management
-- [x] Audit logging with Loki
-- [x] RBAC support ready
+Status reflects the design, not a finished build (see Section 9 for what's
+actually implemented so far).
+- [ ] Input validation & sanitization (Pydantic schemas — planned)
+- [ ] File upload malware scanning (e.g. ClamAV) — hash-based dedup only so far, NOT a security scan
+- [ ] API authentication (API key/JWT via `api/auth.py` + `users` table — planned)
+- [ ] Rate limiting
+- [ ] Secrets via environment variables / secret store (no plaintext credentials in config — see Section 6)
+- [ ] Audit logging with Loki
+- [ ] RBAC (`users.role` column exists in schema — enforcement not yet built)
 
 ### Performance Optimization
 - [x] Batch embedding generation
@@ -888,10 +951,13 @@ Can run on:
 - **F1 Score**: 0.80+
 
 ### Response Quality
-- **BLEU Score**: 0.25+
-- **ROUGE Score**: 0.30+
+BLEU/ROUGE are reference-translation/summarization metrics and a poor fit
+for open-ended QA, where many correct phrasings exist. Use RAG-specific,
+LLM-judged metrics instead (e.g. via the RAGAS framework):
+- **Faithfulness** (is the answer actually supported by the retrieved chunks, not hallucinated?): 0.90+
+- **Answer Relevancy** (does the answer address the question asked?): 0.85+
+- **Context Precision** (are the retrieved chunks actually relevant?): 0.80+
 - **Human Evaluation**: 4/5 stars
-- **Fact Accuracy**: 95%+
 
 ### System Performance
 - **P50 Latency**: < 500ms
@@ -908,7 +974,10 @@ Can run on:
 
 ## 14. Open Source Dependencies
 
-All dependencies are Apache 2.0, MIT, or BSD licensed:
+All dependencies are free and open source. Most are permissively licensed
+(Apache 2.0, MIT, BSD); Loki and Grafana are AGPLv3, which is still free
+to self-host but has stricter terms if you ever modify and redistribute
+them as a service — irrelevant for this project's internal, self-hosted use:
 
 ```
 Core:
