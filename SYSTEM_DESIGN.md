@@ -331,6 +331,7 @@ flowchart TB
     User([User])
 
     subgraph API["API Layer (FastAPI)"]
+        AuthRoutes["/auth routes<br/>register, rotate-key"]
         AuthMW["auth.py<br/>API key / JWT check"]
         DocRoutes["/documents routes"]
         QueryRoutes["/query routes"]
@@ -373,10 +374,13 @@ flowchart TB
         Grafana["Grafana"]
     end
 
+    User -->|"0 register, get API key"| AuthRoutes
+    AuthRoutes -->|"create user"| Postgres
     User -->|"1 upload doc"| DocRoutes
     User -->|"2 ask question"| QueryRoutes
     DocRoutes --> AuthMW
     QueryRoutes --> AuthMW
+    AuthMW -->|"verify api_key_hash"| Postgres
 
     DocRoutes --> Parser --> Dedup --> Chunker
     Dedup --> Uploads
@@ -640,7 +644,7 @@ GET    /api/v1/logs                      Recent logs (JSON)
 app:
   name: "RAG Knowledge Assistant"
   version: "1.0.0"
-  environment: "production"
+  environment: "development"  # override to "production" outside the Quick Start / docker-compose flow
   debug: false
 
 # Local Embedding Configuration
