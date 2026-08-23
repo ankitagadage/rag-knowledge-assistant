@@ -940,7 +940,7 @@ System Metrics:
   "tokens_used": 450,
   "confidence_score": 0.92,
   "metadata": {
-    "model_version": "llama2-13b",
+    "model_version": "llama3-8b",
     "embedding_model": "all-mpnet-base-v2"
   }
 }
@@ -1149,20 +1149,22 @@ actually implemented so far).
 - [ ] RBAC (`users.role` column exists in schema — enforcement not yet built)
 
 ### Performance Optimization
-- [x] Batch embedding generation
-- [x] Vector DB indexing optimization
-- [x] Redis caching layer
-- [x] Horizontal pod autoscaling
-- [x] Query result caching
-- [x] Local model inference (no API latency)
+Planned, tracked in Section 10's phase checklist — not yet built.
+- [ ] Batch embedding generation
+- [ ] Vector DB indexing optimization
+- [ ] Redis caching layer
+- [ ] Horizontal pod autoscaling
+- [ ] Query result caching
+- [ ] Local model inference (no API latency)
 
 ### Monitoring & Alerting
-- [x] Prometheus metrics collection
-- [x] Grafana dashboards
-- [x] Loki log aggregation
-- [x] Jaeger distributed tracing
-- [x] Alert rules for critical metrics
-- [x] Health check endpoints
+Planned, tracked in Section 10's phase checklist — not yet built.
+- [ ] Prometheus metrics collection
+- [ ] Grafana dashboards
+- [ ] Loki log aggregation
+- [ ] Jaeger distributed tracing
+- [ ] Alert rules for critical metrics
+- [ ] Health check endpoints
 
 ---
 
