@@ -1013,7 +1013,7 @@ Available Dashboards:
 - [x] Project setup and structure
 - [x] System design documentation
 - [x] Database schema and migrations (`src/database/models.py`, `alembic/versions/0001_initial_schema.py` — verified against a real local PostgreSQL 17 instance: `alembic upgrade head` / `downgrade base` both tested)
-- [ ] Document parsers (PDF, DOCX, TXT, MD)
+- [x] Document parsers (PDF, DOCX, TXT, MD) (`src/document_ingestion/parsers.py` — verified against real sample files for all 4 formats plus missing-file/unsupported-type/empty-file error paths)
 - [ ] Text chunking with deduplication
 - [ ] Prometheus metrics setup
 - [ ] Structured logging with Loki
