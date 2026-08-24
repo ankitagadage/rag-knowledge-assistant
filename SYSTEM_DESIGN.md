@@ -1014,7 +1014,7 @@ Available Dashboards:
 - [x] System design documentation
 - [x] Database schema and migrations (`src/database/models.py`, `alembic/versions/0001_initial_schema.py` — verified against a real local PostgreSQL 17 instance: `alembic upgrade head` / `downgrade base` both tested)
 - [x] Document parsers (PDF, DOCX, TXT, MD) (`src/document_ingestion/parsers.py` — verified against real sample files for all 4 formats plus missing-file/unsupported-type/empty-file error paths)
-- [ ] Text chunking with deduplication
+- [x] Text chunking with deduplication (`src/document_ingestion/chunker.py`, `deduplicator.py`, `preprocessor.py` — verified: chunk offsets/overlap match the source text, edge cases (empty text, invalid config, small trailing-chunk merge) confirmed, and deduplicator round-tripped against the real `rag_db` database)
 - [ ] Prometheus metrics setup
 - [ ] Structured logging with Loki
 - [ ] Unit tests for core components
