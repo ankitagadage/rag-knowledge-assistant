@@ -1012,7 +1012,7 @@ Available Dashboards:
 ### Phase 1: Core Infrastructure + Observability (Week 1-2)
 - [x] Project setup and structure
 - [x] System design documentation
-- [x] Database schema and migrations (`src/database/models.py`, `alembic/versions/0001_initial_schema.py` — untested, no local Postgres/Python runtime available yet to run `alembic upgrade head`)
+- [x] Database schema and migrations (`src/database/models.py`, `alembic/versions/0001_initial_schema.py` — verified against a real local PostgreSQL 17 instance: `alembic upgrade head` / `downgrade base` both tested)
 - [ ] Document parsers (PDF, DOCX, TXT, MD)
 - [ ] Text chunking with deduplication
 - [ ] Prometheus metrics setup

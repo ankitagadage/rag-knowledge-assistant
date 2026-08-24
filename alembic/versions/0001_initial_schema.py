@@ -26,7 +26,11 @@ document_status = postgresql.ENUM(
 
 
 def upgrade() -> None:
-    document_status.create(op.get_bind(), checkfirst=True)
+    # Don't pre-create document_status here: op.create_table("documents", ...)
+    # below already emits `CREATE TYPE document_status` as part of creating
+    # the table (since the enum is embedded in that table's `status` column),
+    # and it does so unconditionally rather than honoring checkfirst — doing
+    # both raises psycopg2.errors.DuplicateObject on the second attempt.
 
     op.create_table(
         "users",
