@@ -578,7 +578,7 @@ Postgres write would leave an orphaned vector with no citation record.
 ```sql
 CREATE TABLE queries (
   id UUID PRIMARY KEY,
-  user_id VARCHAR(255),
+  user_id UUID REFERENCES users(id),  -- nullable: queries can be logged with auth disabled
   query_text TEXT,
   retrieved_chunks INT,
   response TEXT,
@@ -871,6 +871,12 @@ rag-knowledge-assistant/
 │   ├── prometheus.yml
 │   ├── loki-config.yml
 │   └── jaeger-config.yml
+├── alembic/
+│   ├── env.py
+│   ├── script.py.mako
+│   └── versions/
+│       └── 0001_initial_schema.py
+├── alembic.ini
 ├── docker-compose.yml
 ├── docker-compose.prod.yml
 ├── .env.example
@@ -1006,7 +1012,7 @@ Available Dashboards:
 ### Phase 1: Core Infrastructure + Observability (Week 1-2)
 - [x] Project setup and structure
 - [x] System design documentation
-- [ ] Database schema and migrations
+- [x] Database schema and migrations (`src/database/models.py`, `alembic/versions/0001_initial_schema.py` — untested, no local Postgres/Python runtime available yet to run `alembic upgrade head`)
 - [ ] Document parsers (PDF, DOCX, TXT, MD)
 - [ ] Text chunking with deduplication
 - [ ] Prometheus metrics setup

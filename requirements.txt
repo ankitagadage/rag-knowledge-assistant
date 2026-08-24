@@ -1,0 +1,8 @@
+# Phase 1 (Section 10): database schema + migrations.
+# More dependencies get added here as later phases (embeddings, retrieval,
+# LLM, API) are implemented — see SYSTEM_DESIGN.md Section 4 for the full
+# eventual list.
+sqlalchemy==2.0.35
+alembic==1.13.3
+psycopg2-binary==2.9.9
+python-dotenv==1.0.1
